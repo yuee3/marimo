@@ -29,6 +29,8 @@ CATALOG_KINDS = frozenset(
 NOTEBOOK_KINDS = frozenset(
     {
         "notebook",
+        "document",
+        "cell",
         "runtime",
         "attachment",
         "run",
@@ -42,6 +44,8 @@ Body: TypeAlias = (
     protocol.Host
     | protocol.Project
     | protocol.Notebook
+    | protocol.Document
+    | protocol.Cell
     | protocol.Runtime
     | protocol.Attachment
     | protocol.Run
@@ -54,6 +58,8 @@ _WRAPPERS: dict[str, type[msgspec.Struct]] = {
     "host": protocol.HostMessage,
     "project": protocol.ProjectMessage,
     "notebook": protocol.NotebookMessage,
+    "document": protocol.DocumentMessage,
+    "cell": protocol.CellMessage,
     "runtime": protocol.RuntimeMessage,
     "attachment": protocol.AttachmentMessage,
     "run": protocol.RunMessage,

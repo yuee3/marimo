@@ -4,12 +4,12 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 from typing import TYPE_CHECKING
 
 import pytest
 
+from marimo._core.document import code_hash
 from marimo._server.host.bridge import SessionBridge
 from marimo._server.host.context import HostContext
 from marimo._server.main import create_starlette_app
@@ -702,8 +702,8 @@ async def test_a_fixed_cell_replaces_its_failed_compilation(
         and r["data"]["execution"]["status"] == "completed"
     ]
     assert [(e["code_hash"], e["outcome"]["kind"]) for e in executions] == [
-        (hashlib.sha256(b"if !!!").hexdigest(), "error"),
-        (hashlib.sha256(b"x = 42").hexdigest(), "value"),
+        (code_hash("if !!!"), "error"),
+        (code_hash("x = 42"), "value"),
     ]
     assert len({e["id"] for e in executions}) == 2
     runs = [
@@ -821,9 +821,7 @@ async def test_awaited_commands_join_the_enclosing_run(
     assert root["outcome"]["kind"] == "value"
     assert "42" in root["outcome"]["display"]["data"]
     assert child["outcome"]["kind"] == "error"
-    assert (
-        child["code_hash"] == hashlib.sha256(child_code.encode()).hexdigest()
-    )
+    assert child["code_hash"] == code_hash(child_code)
     assert all(e["run_id"] == accepted.json()["id"] for e in executions)
 
 

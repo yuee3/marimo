@@ -1,5 +1,5 @@
 # Copyright 2026 Marimo. All rights reserved.
-"""Notebook runtimes, client attachments, and runs.
+"""Notebook documents, runtimes, client attachments, and runs.
 
 Runtime and run commands call a backend. `Notebook.observe` applies
 backend updates and publishes events.
@@ -19,9 +19,14 @@ from marimo._core.ids import mint
 from marimo._core.stream import Event, kind_of, message, utcnow
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping, Sequence
 
+    from marimo._core.document import CellSource, Changed, Document
     from marimo._core.stream import Stream
+
+Body = (
+    protocol.Document | protocol.Cell | protocol.Runtime | protocol.Attachment
+)
 
 
 class Notebook:
@@ -50,6 +55,8 @@ class Notebook:
         self._backend = backend
         self._stream = stream
         self._closed = False
+        self.document: Document | None = None
+        """The document, once loaded. `None` until then."""
         self._runtime: protocol.Runtime | None = None
         self._attachments: dict[str, protocol.Attachment] = {}
         self._state = ExecutionState(
@@ -79,6 +86,59 @@ class Notebook:
     def _require_open(self) -> None:
         if self._closed:
             raise NotFound(f"no notebook {self.id}")
+
+    # ---- document ------------------------------------------------------
+
+    def load(
+        self, document: Document, *, request_id: str | None = None
+    ) -> None:
+        """Adopt a document, publishing its cells and then the document.
+
+        Raises:
+            ValueError: If the notebook already has a document.
+        """
+        self._require_open()
+        if self.document is not None:
+            raise ValueError(f"notebook {self.id} already has a document")
+        self.document = document
+        for cell in document.cells:
+            self._publish(cell, request_id)
+        self._publish(document.document, request_id)
+
+    def replace(
+        self,
+        cells: Sequence[CellSource],
+        app_config: Mapping[str, object],
+        *,
+        request_id: str | None = None,
+    ) -> Changed:
+        """Replace the document's contents and publish what changed."""
+        document = self._require_document()
+        changed = document.replace(cells, app_config)
+        self._publish_changed(changed, request_id)
+        return changed
+
+    def mark_saved(self, *, request_id: str | None = None) -> None:
+        """Record that the document's current state is in the store."""
+        document = self._require_document().mark_saved()
+        if document is not None:
+            self._publish(document, request_id)
+
+    def _require_document(self) -> Document:
+        self._require_open()
+        if self.document is None:
+            raise Conflict(f"notebook {self.id} has no document loaded")
+        return self.document
+
+    def _publish_changed(
+        self, changed: Changed, request_id: str | None
+    ) -> None:
+        for cell in changed.cells:
+            self._publish(cell, request_id)
+        for cell_id in changed.removed:
+            self._remove("cell", cell_id, request_id)
+        if changed.document is not None:
+            self._publish(changed.document, request_id)
 
     # ---- runtime -------------------------------------------------------
 
@@ -343,9 +403,13 @@ class Notebook:
     def _snapshot(self) -> list[Event]:
         """Return notebook objects as snapshot events, parents first.
 
-        Runs, executions, and outputs keep their insertion order.
+        Cells precede the document that orders them. Runs, executions,
+        and outputs keep their insertion order.
         """
-        bodies: list[protocol.Runtime | protocol.Attachment] = []
+        bodies: list[Body] = []
+        if self.document is not None:
+            bodies.extend(self.document.cells)
+            bodies.append(self.document.document)
         if self._runtime is not None:
             bodies.append(self._runtime)
         bodies.extend(self._attachments.values())
@@ -372,11 +436,7 @@ class Notebook:
             runtime, self._runtime = self._runtime, None
             self._remove("runtime", runtime.id, request_id)
 
-    def _publish(
-        self,
-        body: protocol.Runtime | protocol.Attachment,
-        request_id: str | None,
-    ) -> None:
+    def _publish(self, body: Body, request_id: str | None) -> None:
         self._stream.publish(
             body,
             notebook_id=self.id,
