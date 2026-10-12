@@ -347,6 +347,7 @@ async def _notebook_events(request: Request) -> Response:
     context = _context(request)
     try:
         notebook = _notebook(request)
+        await context.bridge.ensure_document(notebook.id)
     except NotFound as e:
         return problem(404, "not-found", str(e))
     cursor = _cursor(request)

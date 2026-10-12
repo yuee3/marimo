@@ -92,7 +92,9 @@ class Harness:
 
 @pytest.fixture
 def harness(tmp_path: Path, request: pytest.FixtureRequest) -> Harness:
-    (tmp_path / "forecasts.py").write_text("import marimo\n")
+    (tmp_path / "forecasts.py").write_text(
+        "import marimo\napp = marimo.App()\n"
+    )
     workspace = FixedFilesWorkspace(
         [MarimoFile(name="forecasts.py", path=str(tmp_path / "forecasts.py"))],
         directory=str(tmp_path),
@@ -278,13 +280,25 @@ async def test_a_notebook_stream_attaches_the_client(harness: Harness) -> None:
         harness.app, "GET", f"/notebooks/{notebook.id}/events", headers=AUTH
     )
     await wait_for(response, until_ready)
-    assert response.names() == ["notebook", "attachment", "ready"]
-    assert response.records[1]["data"]["attachment"]["kind"] == "client"
+    # An empty notebook loads with marimo's one default cell.
+    assert response.names() == [
+        "notebook",
+        "cell",
+        "document",
+        "attachment",
+        "ready",
+    ]
+    assert response.records[2]["data"]["document"]["order"] == [
+        response.records[1]["data"]["cell"]["id"]
+    ]
+    assert response.records[3]["data"]["attachment"]["kind"] == "client"
 
     disconnect()
     await asyncio.wait_for(task, 5)
     assert [e.name for e in harness.host.events(notebook_id=notebook.id)] == [
         "notebook",
+        "cell",
+        "document",
         "ready",
     ]
 
@@ -1034,3 +1048,93 @@ async def test_symlink_escape_has_no_filesystem_side_effects(
     assert [n.path for n in harness.host.notebooks.values()] == [
         "forecasts.py"
     ]
+
+
+NOTEBOOK = """import marimo
+
+__generated_with = "0.0.0"
+app = marimo.App(width="full")
+
+
+@app.cell
+def _():
+    x = 21
+    return (x,)
+
+
+@app.cell(hide_code=True)
+def _(x):
+    y = x * 2
+    return
+
+
+if __name__ == "__main__":
+    app.run()
+"""
+
+
+async def test_the_notebook_stream_carries_cells_then_the_document(
+    harness: Harness,
+) -> None:
+    (harness.root / "forecasts.py").write_text(NOTEBOOK)
+    response, _, disconnect = request(
+        harness.app,
+        "GET",
+        f"/notebooks/{harness.notebook_id}/events",
+        headers=AUTH,
+    )
+    await wait_for(response, until_ready)
+    disconnect()
+
+    assert response.names() == [
+        "notebook",
+        "cell",
+        "cell",
+        "document",
+        "attachment",
+        "ready",
+    ]
+    first, second = (r["data"]["cell"] for r in response.records[1:3])
+    document = response.records[3]["data"]["document"]
+    assert first["code"] == "x = 21"
+    assert first["analysis"] == {"defs": ["x"], "refs": [], "errors": []}
+    assert second["code"] == "y = x * 2"
+    assert second["config"]["hide_code"] is True
+    assert second["analysis"]["refs"] == ["x"]
+    assert document["order"] == [first["id"], second["id"]]
+    assert document["app_config"] == {"width": "full"}
+    assert document["policy"] == "autorun"
+    assert document["saved_etag"] == document["etag"]
+    assert all(
+        c["notebook_id"] == harness.notebook_id for c in (first, second)
+    )
+
+    # A filtered stream is a snapshot of the document alone, and a second
+    # connection reuses the loaded document.
+    response, _, disconnect = request(
+        harness.app,
+        "GET",
+        f"/notebooks/{harness.notebook_id}/events",
+        headers=AUTH,
+        query="types=cell,document",
+    )
+    await wait_for(response, until_ready)
+    disconnect()
+    assert response.names() == ["cell", "cell", "document", "ready"]
+    assert response.records[2]["data"]["document"] == document
+
+
+async def test_a_notebook_that_does_not_load_streams_without_a_document(
+    harness: Harness,
+) -> None:
+    (harness.root / "forecasts.py").write_text("print('not a notebook')\n")
+
+    response, _, disconnect = request(
+        harness.app,
+        "GET",
+        f"/notebooks/{harness.notebook_id}/events",
+        headers=AUTH,
+    )
+    await wait_for(response, until_ready)
+    disconnect()
+    assert response.names() == ["notebook", "attachment", "ready"]

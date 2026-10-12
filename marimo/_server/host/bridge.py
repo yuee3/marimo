@@ -4,14 +4,17 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
+from collections import defaultdict
+from typing import TYPE_CHECKING, Any
 
 from marimo import _loggers
 from marimo._core import protocol
+from marimo._core.document import CellSource, Document
 from marimo._core.errors import Conflict, NotFound
 from marimo._core.host import Host
 from marimo._runtime.commands import RenameNotebookCommand
 from marimo._server.host import OPERATIONS
+from marimo._server.host.analysis import Analyzer
 from marimo._server.host.backend import SessionBackend
 from marimo._server.host.index import WorkspaceIndex
 from marimo._session.events import SessionEventListener
@@ -20,9 +23,13 @@ from marimo._session.notebook.storage import rename_no_replace
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from marimo._ast.cell import CellConfig
+    from marimo._config.manager import MarimoConfigManager
     from marimo._core.backend import Message
+    from marimo._core.document import Policy
     from marimo._core.stream import Event
     from marimo._server.session_manager import SessionManager
+    from marimo._session.notebook import AppFileManager
     from marimo._session.session import Session
 
 LOGGER = _loggers.marimo_logger()
@@ -31,9 +38,17 @@ LOGGER = _loggers.marimo_logger()
 class SessionBridge(SessionEventListener):
     """Connect a host's notebook catalog to a session manager."""
 
-    def __init__(self, manager: SessionManager) -> None:
+    def __init__(
+        self,
+        manager: SessionManager,
+        config_manager: MarimoConfigManager | None = None,
+    ) -> None:
         self._manager = manager
+        self._config_manager = config_manager
         self._files_lock = asyncio.Lock()
+        self._document_locks: defaultdict[str, asyncio.Lock] = defaultdict(
+            asyncio.Lock
+        )
         self.host = Host(operations=OPERATIONS)
         self._backends: dict[protocol.NotebookId, SessionBackend] = {}
         self.index = WorkspaceIndex(
@@ -58,6 +73,68 @@ class SessionBridge(SessionEventListener):
         """Refresh the catalog without observing a half-finished file move."""
         async with self._files_lock:
             await self.index.refresh_async()
+
+    # Documents
+
+    async def ensure_document(self, notebook_id: str) -> Document | None:
+        """Load the notebook's document the first time it is needed.
+
+        With a session, its document is adopted, ids included. Without one,
+        the file is read as a session would read it. A notebook with no
+        file, or one that does not load, has no document, and a later
+        connection tries again.
+
+        Raises:
+            NotFound: If the notebook is not in the catalog.
+        """
+        notebook = self.host.notebook(notebook_id)
+        if notebook.document is not None:
+            return notebook.document
+        async with self._document_locks[notebook.id]:
+            if notebook.document is not None:
+                return notebook.document
+            backend = self._backends.get(notebook.id)
+            session = None if backend is None else backend.session
+            if session is not None:
+                cells, app_config = _from_session(session)
+            else:
+                file = self.index.file_of(notebook.id)
+                if file is None:
+                    return None
+                try:
+                    cells, app_config = await asyncio.to_thread(
+                        self._read, str(file)
+                    )
+                except Exception as e:
+                    LOGGER.warning("Could not load %s: %s", file, e)
+                    return None
+            document = Document(
+                notebook.id,
+                cells,
+                app_config,
+                policy=self._policy(),
+                analyzer=Analyzer(),
+            )
+            # The notebook may have gone while the file was read.
+            self.host.notebook(notebook_id).load(document)
+            return document
+
+    def _read(self, path: str) -> tuple[list[CellSource], dict[str, Any]]:
+        from marimo._server.app_defaults import AppDefaults
+        from marimo._session.notebook import AppFileManager
+
+        defaults = (
+            None
+            if self._config_manager is None
+            else AppDefaults.from_config_manager(self._config_manager)
+        )
+        return _from_file_manager(AppFileManager(path, defaults=defaults))
+
+    def _policy(self) -> Policy:
+        if self._config_manager is None:
+            return "autorun"
+        policy = self._config_manager.get_config()["runtime"]["on_cell_change"]
+        return "lazy" if policy == "lazy" else "autorun"
 
     def _project_path(self, path: Path) -> Path:
         root = self.index.root
@@ -239,3 +316,30 @@ class SessionBridge(SessionEventListener):
             self._adopt(session)
             return
         self.index.moved(notebook.id, path)
+
+
+def _from_session(session: Session) -> tuple[list[CellSource], dict[str, Any]]:
+    cells = [
+        CellSource(cell.id, cell.code, cell.name, _config(cell.config))
+        for cell in session.document.cells
+    ]
+    return cells, session.app_file_manager.app.config.asdict_difference()
+
+
+def _from_file_manager(
+    manager: AppFileManager,
+) -> tuple[list[CellSource], dict[str, Any]]:
+    cells = [
+        CellSource(data.cell_id, data.code, data.name, _config(data.config))
+        for data in manager.app.cell_manager.cell_data()
+    ]
+    return cells, manager.app.config.asdict_difference()
+
+
+def _config(config: CellConfig) -> protocol.CellConfig:
+    return protocol.CellConfig(
+        column=config.column,
+        disabled=config.disabled,
+        hide_code=config.hide_code,
+        expand_output=config.expand_output,
+    )
