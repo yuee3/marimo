@@ -10,11 +10,13 @@ from unittest.mock import MagicMock
 import pytest
 
 from marimo._core import backend as be
+from marimo._messaging.notification import NotificationMessage
 from marimo._messaging.serde import serialize_kernel_message
 from marimo._session.consumer import SessionConsumer
 from marimo._session.events import SessionEventBus
 from marimo._session.model import ConnectionState
 from marimo._session.types import KernelState
+from marimo._types.ids import ConsumerId
 
 
 class FakeSession:
@@ -25,6 +27,7 @@ class FakeSession:
         self.event_bus = SessionEventBus()
         self.consumers: list[tuple[SessionConsumer, bool]] = []
         self.commands: list[Any] = []
+        self.notifications: list[NotificationMessage] = []
         self.submitted = asyncio.Event()
         self.interrupts = 0
         self.closed = False
@@ -82,6 +85,16 @@ class FakeSession:
         message = serialize_kernel_message(notification)
         for consumer, _ in list(self.consumers):
             consumer.notify(message)
+
+    def notify(
+        self,
+        notification: NotificationMessage,
+        from_consumer_id: ConsumerId | None = None,
+    ) -> None:
+        """What a session does with a notification: record and broadcast."""
+        del from_consumer_id
+        self.notifications.append(notification)
+        self.broadcast(notification)
 
 
 class FakeManager:

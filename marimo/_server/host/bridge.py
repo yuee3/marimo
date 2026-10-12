@@ -13,7 +13,7 @@ from marimo._core.document import CellSource, Document
 from marimo._core.errors import Conflict, NotFound
 from marimo._core.host import Host
 from marimo._runtime.commands import RenameNotebookCommand
-from marimo._server.host import OPERATIONS
+from marimo._server.host import OPERATIONS, document as documents
 from marimo._server.host.analysis import Analyzer
 from marimo._server.host.backend import SessionBackend
 from marimo._server.host.index import WorkspaceIndex
@@ -21,9 +21,9 @@ from marimo._session.events import SessionEventListener
 from marimo._session.notebook.storage import rename_no_replace
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
-    from marimo._ast.cell import CellConfig
     from marimo._config.manager import MarimoConfigManager
     from marimo._core.backend import Message
     from marimo._core.document import Policy
@@ -93,11 +93,10 @@ class SessionBridge(SessionEventListener):
         async with self._document_locks[notebook.id]:
             if notebook.document is not None:
                 return notebook.document
-            backend = self._backends.get(notebook.id)
-            session = None if backend is None else backend.session
+            session = self._session_of(notebook.id)
             file = self.index.file_of(notebook.id)
             if session is not None:
-                cells, app_config = _from_session(session)
+                cells, app_config = documents.from_session(session)
             else:
                 if file is None:
                     return None
@@ -144,6 +143,9 @@ class SessionBridge(SessionEventListener):
         return Document(notebook_id, *loaded).document.etag
 
     def _read(self, path: str) -> tuple[list[CellSource], dict[str, Any]]:
+        return documents.from_file_manager(self._file_manager(path))
+
+    def _file_manager(self, path: str) -> AppFileManager:
         from marimo._server.app_defaults import AppDefaults
         from marimo._session.notebook import AppFileManager
 
@@ -152,7 +154,56 @@ class SessionBridge(SessionEventListener):
             if self._config_manager is None
             else AppDefaults.from_config_manager(self._config_manager)
         )
-        return _from_file_manager(AppFileManager(path, defaults=defaults))
+        return AppFileManager(path, defaults=defaults)
+
+    async def edit(
+        self,
+        notebook_id: str,
+        changes: Sequence[protocol.Change],
+        *,
+        request_id: str,
+    ) -> protocol.EditResponse:
+        """Apply an edit to the document, and to the session when there is one.
+
+        The file is not written; `save` does that.
+
+        Raises:
+            Conflict: If the notebook has no document.
+            EditConflict: If a precondition is stale.
+            Invalid: If a change could not apply to any state.
+        """
+        document = await self.ensure_document(notebook_id)
+        if document is None:
+            raise Conflict("The notebook has no document to edit")
+        notebook = self.host.notebook(notebook_id)
+        response = notebook.edit(changes, request_id=request_id)
+        session = self._session_of(notebook.id)
+        if session is not None:
+            documents.apply_to_session(session, document)
+        return response
+
+    def _session_of(self, notebook_id: protocol.NotebookId) -> Session | None:
+        backend = self._backends.get(notebook_id)
+        return None if backend is None else backend.session
+
+    def _attach_document(self, notebook_id: protocol.NotebookId) -> None:
+        """Carry host edits made before the session existed into the editor."""
+        session = self._session_of(notebook_id)
+        document = self.host.notebook(notebook_id).document
+        if session is not None and document is not None:
+            documents.apply_to_session(session, document)
+
+    def _mirror(self, notebook_id: protocol.NotebookId) -> None:
+        """Bring the document up to date with the session's after it changed."""
+        session = self._session_of(notebook_id)
+        try:
+            notebook = self.host.notebook(notebook_id)
+        except NotFound:
+            return
+        if session is None or notebook.document is None:
+            return
+        cells, app_config = documents.from_session(session)
+        notebook.replace(cells, app_config)
 
     def _policy(self) -> Policy:
         if self._config_manager is None:
@@ -296,6 +347,8 @@ class SessionBridge(SessionEventListener):
             file,
             self._manager,
             observe,
+            document_changed=lambda: self._mirror(notebook_id),
+            session_attached=lambda: self._attach_document(notebook_id),
         )
         self._backends[notebook_id] = backend
         return backend
@@ -340,40 +393,3 @@ class SessionBridge(SessionEventListener):
             self._adopt(session)
             return
         self.index.moved(notebook.id, path)
-
-
-def _from_session(session: Session) -> tuple[list[CellSource], dict[str, Any]]:
-    cells = [
-        CellSource(
-            protocol.CellId(cell.id),
-            cell.code,
-            cell.name,
-            _config(cell.config),
-        )
-        for cell in session.document.cells
-    ]
-    return cells, session.app_file_manager.app.config.asdict_difference()
-
-
-def _from_file_manager(
-    manager: AppFileManager,
-) -> tuple[list[CellSource], dict[str, Any]]:
-    cells = [
-        CellSource(
-            protocol.CellId(data.cell_id),
-            data.code,
-            data.name,
-            _config(data.config),
-        )
-        for data in manager.app.cell_manager.cell_data()
-    ]
-    return cells, manager.app.config.asdict_difference()
-
-
-def _config(config: CellConfig) -> protocol.CellConfig:
-    return protocol.CellConfig(
-        column=config.column,
-        disabled=config.disabled,
-        hide_code=config.hide_code,
-        expand_output=config.expand_output,
-    )

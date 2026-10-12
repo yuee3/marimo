@@ -19,7 +19,13 @@ from starlette.routing import Route, Router
 
 from marimo import _loggers
 from marimo._core import protocol
-from marimo._core.errors import Conflict, NoRuntime, NotFound
+from marimo._core.errors import (
+    Conflict,
+    EditConflict,
+    Invalid,
+    NoRuntime,
+    NotFound,
+)
 from marimo._server.api.auth import TOKEN_QUERY_PARAM
 from marimo._server.api.deps import AppStateBase
 from marimo._server.api.utils import format_url_host, open_url_in_browser
@@ -60,13 +66,20 @@ _TITLES = {
 }
 
 
-def problem(status: int, kind: str, detail: str | None = None) -> Response:
+def problem(
+    status: int,
+    kind: str,
+    detail: str | None = None,
+    *,
+    edit: protocol.EditConflict | None = None,
+) -> Response:
     """Return a protocol error as an HTTP problem response."""
     body = protocol.Problem(
         type=PROBLEM_TYPE_PREFIX + kind,
         title=_TITLES[kind],
         status=status,
         detail=msgspec.UNSET if detail is None else detail,
+        edit=msgspec.UNSET if edit is None else edit,
     )
     return Response(
         msgspec.json.encode(body),
@@ -84,6 +97,7 @@ def build_app() -> ASGIApp:
             Route("/notebooks/{id}", _update_notebook, methods=["PATCH"]),
             Route("/notebooks/{id}", _delete_notebook, methods=["DELETE"]),
             Route("/notebooks/{id}/events", _notebook_events, methods=["GET"]),
+            Route("/notebooks/{id}/edits", _edit_notebook, methods=["POST"]),
             Route("/notebooks/{id}/open", _open_notebook, methods=["POST"]),
             Route("/notebooks/{id}/runtime", _start_runtime, methods=["PUT"]),
             Route(
@@ -298,8 +312,21 @@ async def _execute_mutation(endpoint: _Endpoint, request: Request) -> Response:
         return await endpoint(request)
     except NoRuntime as e:
         return problem(409, "no-runtime", str(e))
+    except EditConflict as e:
+        return problem(
+            409,
+            "conflict",
+            str(e),
+            edit=protocol.EditConflict(
+                change=e.change,
+                cell=e.cell,
+                document=e.document,
+            ),
+        )
     except Conflict as e:
         return problem(409, "conflict", str(e))
+    except Invalid as e:
+        return problem(400, "invalid-request", str(e))
     except NotFound as e:
         return problem(404, "not-found", str(e))
     except msgspec.DecodeError as e:
@@ -504,6 +531,19 @@ async def _delete_notebook(request: Request) -> Response:
     key = request.headers["Idempotency-Key"]
     await context.bridge.delete(_notebook(request).id, request_id=key)
     return _reply(204, None)
+
+
+@_mutation("notebook.edit")
+async def _edit_notebook(request: Request) -> Response:
+    """Apply an edit as one unit; 409 with `edit` when a precondition is stale."""
+    context = _context(request)
+    key = request.headers["Idempotency-Key"]
+    notebook = _notebook(request)
+    body = await _decode(request, protocol.EditRequest)
+    response = await context.bridge.edit(
+        notebook.id, body.changes, request_id=key
+    )
+    return _reply(200, response)
 
 
 @_mutation("notebook.open")
