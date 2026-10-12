@@ -6,6 +6,7 @@ from __future__ import annotations
 import pytest
 
 from marimo._core import backend as be, protocol
+from marimo._core.document import CellSource, Document
 from marimo._core.host import Host
 from marimo._core.notebook import Notebook
 from marimo._core.stream import Event, Stream
@@ -159,3 +160,32 @@ def test_subscribers_cannot_start_a_runtime_during_adoption(
         [(replacement, False)],
         [],
     )
+
+
+@pytest.mark.parametrize("scratch", [True, False])
+def test_subscribers_interrupt_only_after_a_run_reaches_the_backend(
+    host: Host, notebook: Notebook, backend: ScriptedBackend, scratch: bool
+) -> None:
+    notebook.load(Document(notebook.id, [CellSource("a", "1")], {}))
+    runtime, _ = notebook.start()
+    notebook.observe(be.Running(runtime.id))
+    backend.calls.clear()
+
+    def interrupt_on_run(event: Event) -> None:
+        if isinstance(event.data, protocol.RunMessage):
+            notebook.interrupt(event.data.run.id)
+
+    host.subscribe(interrupt_on_run, notebook_id=notebook.id, types={"run"})
+
+    expected: tuple[object, ...]
+    if scratch:
+        run = notebook.run("1", request_id="run")
+        expected = ("run", run.id, "1")
+    else:
+        run = notebook.run(
+            cells=[protocol.RequestedCell(id=protocol.CellId("a"))],
+            request_id="run",
+        )
+        expected = ("run_cells", run.id, ["a"])
+
+    assert backend.calls == [expected, ("interrupt", run.id)]

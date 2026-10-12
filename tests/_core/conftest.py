@@ -3,12 +3,17 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
 
 from marimo._core import protocol
 from marimo._core.host import Host
 from marimo._core.notebook import Notebook
 from marimo._core.stream import Event
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 OPERATIONS = ["notebook.create", "runtime.start", "runtime.run"]
 
@@ -27,6 +32,9 @@ class ScriptedBackend:
 
     def run(self, run_id: str, code: str) -> None:
         self.calls.append(("run", run_id, code))
+
+    def run_cells(self, run_id: str, cells: Sequence[protocol.Cell]) -> None:
+        self.calls.append(("run_cells", run_id, [cell.id for cell in cells]))
 
     def interrupt(self, run_id: str) -> None:
         self.calls.append(("interrupt", run_id))

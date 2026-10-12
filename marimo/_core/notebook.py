@@ -10,11 +10,18 @@ from __future__ import annotations
 from time import monotonic
 from typing import TYPE_CHECKING
 
+from msgspec import UNSET
 from msgspec.structs import replace
 
 from marimo._core import backend as be, protocol
 from marimo._core.document import Changed
-from marimo._core.errors import Conflict, NoRuntime, NotFound
+from marimo._core.errors import (
+    Conflict,
+    EditConflict,
+    Invalid,
+    NoRuntime,
+    NotFound,
+)
 from marimo._core.execution_state import ExecutionState, RetentionPolicy
 from marimo._core.ids import mint
 from marimo._core.stream import Event, kind_of, message, utcnow
@@ -292,23 +299,35 @@ class Notebook:
 
     # ---- runs ----------------------------------------------------------
 
-    def run(self, code: str, *, request_id: str) -> protocol.Run:
-        """Queue scratch code on the runtime.
+    def run(
+        self,
+        code: str | None = None,
+        *,
+        cells: Sequence[protocol.RequestedCell] = (),
+        request_id: str,
+    ) -> protocol.Run:
+        """Queue scratch code, or cells of the document, on the runtime.
 
         The host assigns the run ID. Request IDs correlate events. The
         host retains retry receipts separately from execution results.
 
         Raises:
+            Invalid: If neither or both of `code` and `cells` are given.
             NoRuntime: If the notebook has no runtime.
             Conflict: If the runtime is not running, or a run is in progress.
+            EditConflict: If a cell is not in the document, or its
+                `code_hash` is not the current one.
         """
         with self._stream.deferred():
             self._require_open()
+            if (code is None) == (not cells):
+                raise Invalid("exactly one of code and cells is required.")
             runtime = self._require_runtime()
             if runtime.status != "running":
                 raise Conflict(f"the runtime is {runtime.status}.")
             if (active := self._state.active_run) is not None:
                 raise Conflict(f"run {active.id} is in progress.")
+            requested = self._cells_to_run(cells) if cells else []
             run = protocol.Run(
                 id=mint(protocol.RunId, "run"),
                 notebook_id=self.id,
@@ -319,8 +338,39 @@ class Notebook:
                 completed_at=None,
             )
             self._state.add_run(run, request_id)
-            self._backend.run(run.id, code)
+            if code is not None:
+                self._backend.run(run.id, code)
+            else:
+                self._backend.run_cells(run.id, requested)
             return run
+
+    def _cells_to_run(
+        self, cells: Sequence[protocol.RequestedCell]
+    ) -> list[protocol.Cell]:
+        """The requested cells in document order, once each."""
+        document = self._require_document()
+        wanted: set[str] = set()
+        for index, requested in enumerate(cells):
+            cell = document.cell(requested.id)
+            if cell is None:
+                raise EditConflict(
+                    f"cell {requested.id} is not in the document.",
+                    change=index,
+                    cell=None,
+                    document=document.document,
+                )
+            if (
+                requested.code_hash is not UNSET
+                and requested.code_hash != cell.code_hash
+            ):
+                raise EditConflict(
+                    f"cell {requested.id} has changed since it was read.",
+                    change=index,
+                    cell=cell,
+                    document=document.document,
+                )
+            wanted.add(cell.id)
+        return [cell for cell in document.cells if cell.id in wanted]
 
     def interrupt(self, run_id: str) -> protocol.Run:
         """Request interruption of a run in progress.

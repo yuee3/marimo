@@ -10,21 +10,31 @@ from msgspec import UNSET
 from msgspec.structs import replace
 
 from marimo._core import backend as be
-from marimo._core.errors import Conflict, NoRuntime, NotFound
+from marimo._core.document import CellSource, Document
+from marimo._core.errors import (
+    Conflict,
+    EditConflict,
+    Invalid,
+    NoRuntime,
+    NotFound,
+)
 from marimo._core.host import Host
 from marimo._core.notebook import Notebook
 from marimo._core.protocol import (
+    CellId,
     Console,
     ConsoleMessage,
     DisplayData,
     Error,
     ErrorOutcome,
+    Etag,
     Execution,
     ExecutionId,
     ExecutionMessage,
     InterruptedOutcome,
     ItemId,
     NotebookId,
+    RequestedCell,
     Run,
     RunId,
     RunMessage,
@@ -950,3 +960,60 @@ class TestAttachments:
         assert att.kind == "client"
         assert att.notebook_id == "n1"
         assert names(log) == ["attachment", "attachment.removed"]
+
+
+def test_a_cells_run_names_the_cells_in_document_order(
+    notebook: Notebook, backend: ScriptedBackend
+) -> None:
+    notebook.load(
+        Document(
+            NotebookId("n1"),
+            [
+                CellSource(CellId("a"), "x = 1"),
+                CellSource(CellId("b"), "y = x"),
+            ],
+            {},
+        )
+    )
+    running(notebook, backend)
+    assert notebook.document is not None
+    cell = notebook.document.cell("a")
+    assert cell is not None
+
+    run = notebook.run(
+        cells=[
+            RequestedCell(id=CellId("b")),
+            RequestedCell(id=CellId("a"), code_hash=cell.code_hash),
+        ],
+        request_id="r1",
+    )
+    assert run.status == "queued"
+    assert backend.calls[-1] == ("run_cells", run.id, ["a", "b"])
+    notebook.observe(be.Done(run.id, "succeeded"))
+
+    with pytest.raises(EditConflict) as stale:
+        notebook.run(
+            cells=[RequestedCell(id=CellId("a"), code_hash=Etag("0" * 16))],
+            request_id="r2",
+        )
+    assert (stale.value.change, stale.value.cell) == (0, cell)
+    with pytest.raises(EditConflict) as missing:
+        notebook.run(
+            cells=[
+                RequestedCell(id=CellId("a")),
+                RequestedCell(id=CellId("zz")),
+            ],
+            request_id="r3",
+        )
+    assert (missing.value.change, missing.value.cell) == (1, None)
+    with pytest.raises(Invalid):
+        notebook.run(request_id="r4")
+    with pytest.raises(Invalid):
+        notebook.run(
+            "1", cells=[RequestedCell(id=CellId("a"))], request_id="r5"
+        )
+    # Rejected requests never reach the backend; the completed run was forgotten.
+    assert backend.calls[-2:] == [
+        ("run_cells", run.id, ["a", "b"]),
+        ("forget", run.id),
+    ]
