@@ -1291,12 +1291,12 @@ async def test_a_stale_etag_is_a_conflict_that_changes_nothing(
             {
                 "kind": "set_app_config",
                 "base_etag": "*",
-                "app_config": {"widht": "full"},
+                "app_config": {"width": "full"},
             },
         ),
     )
     assert unknown.status == 400
-    assert unknown.json()["detail"] == "'widht' is not an app config key"
+    assert unknown.json()["detail"] == "'width' is not an app config key"
 
     again, disconnect = await opened(harness)
     disconnect()
@@ -1358,7 +1358,7 @@ async def test_edits_during_a_save_remain_unsaved(
 
 async def test_cell_runs_over_http(harness: Harness) -> None:
     stream, disconnect = await opened(harness)
-    first = next(
+    first, second = (
         r["data"]["cell"] for r in stream.records if r.get("event") == "cell"
     )
     disconnect()
@@ -1379,7 +1379,12 @@ async def test_cell_runs_over_http(harness: Harness) -> None:
     )
     assert accepted.status == 202, accepted.body
     run_id = accepted.json()["id"]
-    assert harness.backend().calls[-1] == ("run_cells", run_id, [first["id"]])
+    # The second cell reads the first's definition, so it runs along.
+    assert harness.backend().calls[-1] == (
+        "run_cells",
+        run_id,
+        [first["id"], second["id"]],
+    )
     harness.host.notebook(harness.notebook_id).observe(
         be.Done(protocol.RunId(run_id), "succeeded")
     )

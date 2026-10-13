@@ -14,7 +14,7 @@ from msgspec import UNSET
 from msgspec.structs import replace
 
 from marimo._core import backend as be, protocol
-from marimo._core.document import Changed
+from marimo._core.document import Changed, dependents
 from marimo._core.errors import (
     Conflict,
     EditConflict,
@@ -347,9 +347,14 @@ class Notebook:
     def _cells_to_run(
         self, cells: Sequence[protocol.RequestedCell]
     ) -> list[protocol.Cell]:
-        """The requested cells in document order, once each."""
+        """The requested cells, with their dependents under autorun.
+
+        In document order, once each. Dependents come from the document's
+        analysis, so the backend runs their current code rather than the
+        code it last saw.
+        """
         document = self._require_document()
-        wanted: set[str] = set()
+        wanted: set[protocol.CellId] = set()
         for index, requested in enumerate(cells):
             cell = document.cell(requested.id)
             if cell is None:
@@ -370,6 +375,8 @@ class Notebook:
                     document=document.document,
                 )
             wanted.add(cell.id)
+        if document.document.policy == "autorun":
+            wanted |= dependents(document.cells, wanted)
         return [cell for cell in document.cells if cell.id in wanted]
 
     def interrupt(self, run_id: str) -> protocol.Run:
