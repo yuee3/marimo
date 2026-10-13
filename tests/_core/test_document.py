@@ -258,6 +258,24 @@ class TestNotebook:
         assert all(e.data.request_id == "edit-1" for e in log)  # type: ignore[union-attr]
         assert log[1].data.id == "k7f2"  # type: ignore[union-attr]
 
+    def test_replace_can_record_the_saved_revision(
+        self, notebook: Notebook, log: list[Event]
+    ) -> None:
+        notebook.load(Document(NOTEBOOK, fixture_cells(), {}))
+        log.clear()
+
+        changed = notebook.replace([source("c1", "x = 22")], {}, saved=True)
+
+        assert changed.document is not None
+        assert changed.document.saved_etag == changed.document.etag
+        assert names(log) == [
+            "cell",
+            "cell.removed",
+            "cell.removed",
+            "document",
+        ]
+        assert log[-1].data.document == changed.document  # type: ignore[union-attr]
+
     def test_load_twice_is_an_error(self, notebook: Notebook) -> None:
         notebook.load(Document(NOTEBOOK, [], {}))
         with pytest.raises(ValueError):

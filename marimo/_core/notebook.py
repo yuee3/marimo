@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 from msgspec.structs import replace
 
 from marimo._core import backend as be, protocol
+from marimo._core.document import Changed
 from marimo._core.errors import Conflict, NoRuntime, NotFound
 from marimo._core.execution_state import ExecutionState, RetentionPolicy
 from marimo._core.ids import mint
@@ -21,7 +22,7 @@ from marimo._core.stream import Event, kind_of, message, utcnow
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
-    from marimo._core.document import CellSource, Changed, Document
+    from marimo._core.document import CellSource, Document
     from marimo._core.stream import Stream
 
 Body = (
@@ -110,11 +111,17 @@ class Notebook:
         cells: Sequence[CellSource],
         app_config: Mapping[str, object],
         *,
+        saved: bool = False,
         request_id: str | None = None,
     ) -> Changed:
-        """Replace the document's contents and publish what changed."""
+        """Replace the document's contents and publish what changed.
+
+        With `saved`, the new contents are also the persisted revision.
+        """
         document = self._require_document()
         changed = document.replace(cells, app_config)
+        if saved and (published := document.mark_saved()) is not None:
+            changed = Changed(changed.cells, changed.removed, published)
         self._publish_changed(changed, request_id)
         return changed
 
