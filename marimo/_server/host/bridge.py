@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from marimo._core.backend import Message
     from marimo._core.document import Policy
     from marimo._core.stream import Event
+    from marimo._messaging.notebook import NotebookCell
     from marimo._server.session_manager import SessionManager
     from marimo._session.notebook import AppFileManager
     from marimo._session.session import Session
@@ -191,6 +192,10 @@ class SessionBridge(SessionEventListener):
     ) -> protocol.EditResponse:
         """Write the document to its file and mark it saved.
 
+        The write goes through a file manager of its own. A session's
+        manager holds the live editor state, which an edit may move on
+        while the snapshot is being written.
+
         Raises:
             Conflict: If the notebook has no document or no file.
             EditConflict: If `if_match` is not the document's etag.
@@ -200,17 +205,10 @@ class SessionBridge(SessionEventListener):
             raise Conflict("The notebook has no document to save")
         async with self._files_lock:
             notebook = self.host.notebook(notebook_id)
-            session = self._session_of(notebook.id)
-            if session is not None:
-                manager = session.app_file_manager
-            else:
-                file = self.index.file_of(notebook.id)
-                if file is None:
-                    raise Conflict("The notebook has no file to save to")
-                manager = await asyncio.to_thread(
-                    self._file_manager, str(file)
-                )
-            # Check and snapshot after waiting for the file lock and loader.
+            file = self.index.file_of(notebook.id)
+            if file is None:
+                raise Conflict("The notebook has no file to save to")
+            # Check and snapshot after waiting for the file lock.
             snapshot = document.document
             if if_match is not None and if_match != snapshot.etag:
                 raise EditConflict(
@@ -219,17 +217,27 @@ class SessionBridge(SessionEventListener):
                     cell=None,
                     document=snapshot,
                 )
-            documents.apply_app_config(manager, snapshot.app_config)
             cells = [
                 documents.to_notebook_cell(cell) for cell in document.cells
             ]
             try:
-                await asyncio.to_thread(manager.save_from_cells, cells)
+                await asyncio.to_thread(
+                    self._write, str(file), cells, snapshot.app_config
+                )
             except Exception as e:
                 raise Conflict(f"The notebook cannot be saved: {e}") from e
-            return self.host.notebook(notebook_id).mark_saved(
-                snapshot.etag, request_id=request_id
-            )
+            return notebook.mark_saved(snapshot.etag, request_id=request_id)
+
+    def _write(
+        self,
+        path: str,
+        cells: list[NotebookCell],
+        app_config: dict[str, Any],
+    ) -> None:
+        """Write a snapshot over the file, keeping the file's header."""
+        manager = self._file_manager(path)
+        documents.apply_app_config(manager, app_config)
+        manager.save_from_cells(cells)
 
     def _session_of(self, notebook_id: protocol.NotebookId) -> Session | None:
         backend = self._backends.get(notebook_id)
