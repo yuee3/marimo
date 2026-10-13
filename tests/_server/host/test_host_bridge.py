@@ -378,6 +378,46 @@ async def test_edits_flow_between_the_host_document_and_a_session(
     bridge.close()
 
 
+async def test_an_edit_is_accepted_in_the_form_the_session_mirrors_back(
+    manager: FakeManager, tmp_path: Path
+) -> None:
+    from marimo._session.notebook import AppFileManager
+
+    prepare(manager, tmp_path, "a.py")
+    path = tmp_path / "a.py"
+    path.write_text(NOTEBOOK)
+    session = FakeSession(str(path))
+    session.document = AppFileManager(str(path)).app.cell_manager.document
+    session.app_file_manager.app.config.asdict_difference.return_value = {}
+    manager.sessions["browser-1"] = session
+    bridge = SessionBridge(manager)  # type: ignore[arg-type]
+    bridge.open()
+    record = bridge.index.notebook_for(str(path))
+    assert record is not None
+    document = await bridge.ensure_document(record.id)
+    assert document is not None
+    (cell,) = document.cells
+
+    # The default width is spelled out; the session reports no difference.
+    response = await bridge.edit(
+        record.id,
+        [
+            protocol.PutCell(
+                base_etag=cell.etag,
+                cell=protocol.CellInput(id=cell.id, code="x = 2"),
+            ),
+            protocol.SetAppConfig(
+                base_etag="*", app_config={"width": "compact"}
+            ),
+        ],
+        request_id="edit-1",
+    )
+
+    assert response.document.app_config == {}
+    assert response.document == document.document
+    bridge.close()
+
+
 async def test_a_new_session_replaces_a_read_without_host_edits(
     manager: FakeManager, tmp_path: Path
 ) -> None:

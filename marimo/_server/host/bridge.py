@@ -111,6 +111,7 @@ class SessionBridge(SessionEventListener):
                 app_config,
                 policy=self._policy(),
                 analyzer=Analyzer(),
+                normalizer=documents.normalize_app_config,
                 saved=session is None,
             )
             if session is not None:
