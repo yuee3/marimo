@@ -173,6 +173,12 @@ class TestReplace:
         assert saved.saved_etag == saved.etag
         assert document.mark_saved() is None
 
+        # A store may hold a revision other than the live one.
+        other = Document(NOTEBOOK, fixture_cells(), {}, saved=False)
+        behind = other.mark_saved(saved.etag)
+        assert behind is not None
+        assert behind.saved_etag == saved.etag != behind.etag
+
 
 class TestAnalysis:
     def test_reruns_over_the_whole_document(self) -> None:

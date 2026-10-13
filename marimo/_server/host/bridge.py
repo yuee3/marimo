@@ -79,10 +79,10 @@ class SessionBridge(SessionEventListener):
     async def ensure_document(self, notebook_id: str) -> Document | None:
         """Load the notebook's document the first time it is needed.
 
-        With a session, its document is adopted, ids included. Without one,
-        the file is read as a session would read it. A notebook with no
-        file, or one that does not load, has no document, and a later
-        connection tries again.
+        With a session, its document is adopted, ids included, and the
+        file says which revision is saved. Without one, the file is read
+        as a session would read it. A notebook with no file, or one that
+        does not load, has no document, and a later connection tries again.
 
         Raises:
             NotFound: If the notebook is not in the catalog.
@@ -95,29 +95,53 @@ class SessionBridge(SessionEventListener):
                 return notebook.document
             backend = self._backends.get(notebook.id)
             session = None if backend is None else backend.session
+            file = self.index.file_of(notebook.id)
             if session is not None:
                 cells, app_config = _from_session(session)
             else:
-                file = self.index.file_of(notebook.id)
                 if file is None:
                     return None
-                try:
-                    cells, app_config = await asyncio.to_thread(
-                        self._read, str(file)
-                    )
-                except Exception as e:
-                    LOGGER.warning("Could not load %s: %s", file, e)
+                loaded = await self._load(file)
+                if loaded is None:
                     return None
+                cells, app_config = loaded
             document = Document(
                 notebook.id,
                 cells,
                 app_config,
                 policy=self._policy(),
                 analyzer=Analyzer(),
+                saved=session is None,
             )
+            if session is not None:
+                # The editor may hold edits the file does not have yet.
+                persisted = await self._persisted_etag(notebook.id, file)
+                if persisted is not None:
+                    document.mark_saved(persisted)
             # The notebook may have gone while the file was read.
             self.host.notebook(notebook_id).load(document)
             return document
+
+    async def _load(
+        self, file: Path
+    ) -> tuple[list[CellSource], dict[str, Any]] | None:
+        """Read the file as a session would, or `None` if it does not load."""
+        try:
+            return await asyncio.to_thread(self._read, str(file))
+        except Exception as e:
+            LOGGER.warning("Could not load %s: %s", file, e)
+            return None
+
+    async def _persisted_etag(
+        self, notebook_id: protocol.NotebookId, file: Path | None
+    ) -> protocol.Etag | None:
+        """The etag of the file's revision, or `None` without a readable file."""
+        loaded = None if file is None else await self._load(file)
+        if loaded is None:
+            return None
+        # Hash the file as a host without a session reads it, so the same
+        # file has the same etag either way.
+        return Document(notebook_id, *loaded).document.etag
 
     def _read(self, path: str) -> tuple[list[CellSource], dict[str, Any]]:
         from marimo._server.app_defaults import AppDefaults

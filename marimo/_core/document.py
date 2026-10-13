@@ -184,9 +184,11 @@ class Document:
         self._app_config = dict(app_config)
         return Changed(changed, removed, self._refresh())
 
-    def mark_saved(self) -> protocol.Document | None:
-        """Record that the current state is the one in the store."""
-        self._saved_etag = self.document.etag
+    def mark_saved(
+        self, etag: protocol.Etag | None = None
+    ) -> protocol.Document | None:
+        """Record the persisted revision, which may precede the live one."""
+        self._saved_etag = self.document.etag if etag is None else etag
         return self._refresh()
 
     def set_policy(self, policy: Policy) -> protocol.Document | None:
