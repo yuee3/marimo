@@ -1291,12 +1291,12 @@ async def test_a_stale_etag_is_a_conflict_that_changes_nothing(
             {
                 "kind": "set_app_config",
                 "base_etag": "*",
-                "app_config": {"widht": "full"},
+                "app_config": {"width": "full"},
             },
         ),
     )
     assert unknown.status == 400
-    assert unknown.json()["detail"] == "'widht' is not an app config key"
+    assert unknown.json()["detail"] == "'width' is not an app config key"
 
     again, disconnect = await opened(harness)
     disconnect()
